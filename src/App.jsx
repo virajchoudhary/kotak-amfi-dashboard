@@ -54,7 +54,7 @@ function prepareTable(sheet, limit) {
     const header = sheet?.columns?.length ? sheet.columns : allRows[workbookHeaderIndex] || [];
     const dataRows = allRows.slice(workbookHeaderIndex + 1).filter(row => !isBlankRow(row));
     const visibleRows = limit ? dataRows.slice(0, limit) : dataRows;
-    const scanRows = [header, ...visibleRows];
+    const scanRows = [header, ...dataRows];
     const maxColumns = Math.max(sheet?.maxColumn || 0, ...scanRows.map(row => row.length));
     const indexes = Array.from({ length: maxColumns }, (_, index) => index)
         .filter(index => scanRows.some(row => !isBlankCell(row[index])));

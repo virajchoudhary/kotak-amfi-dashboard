@@ -74,6 +74,7 @@ METRIC_LABELS = {
 }
 
 
+
 def template_bytes() -> bytes:
     return TEMPLATE_PATH.read_bytes()
 
@@ -129,15 +130,34 @@ def sheet_payloads(workbook_bytes: bytes, sheet_names: list[str]) -> dict:
         }
     return sheets
 
+_SKIP_LABELS = ("grand total", "total", "fund of funds", "growth")
+
+
+def _is_summary_row(ws, row: int) -> bool:
+    value = norm_key(ws.cell(row, 1).value)
+    if not value:
+        return True
+    return any(label in value for label in _SKIP_LABELS)
+
+
 def build_summary(wb) -> dict:
     flat = flat_sheet(wb)
+    blocks = month_blocks(flat)
+    metric_keys = ("funds_mobilized", "redemption", "net_inflow", "net_aum", "avg_aum")
     series = []
-    for block in month_blocks(flat):
+    for block in blocks:
         cols = metric_columns(flat, block["start"], block["end"])
-        sums = {}
-        for key in ("funds_mobilized", "redemption", "net_inflow", "net_aum", "avg_aum"):
-            col = cols.get(key)
-            sums[key] = round(total_metric_value(flat, col), 2) if col else 0
+        sums = {k: 0.0 for k in metric_keys}
+        for row in range(DATA_START_ROW, flat.max_row + 1):
+            if _is_summary_row(flat, row):
+                continue
+            for key in metric_keys:
+                col = cols.get(key)
+                if col:
+                    val = flat.cell(row, col).value
+                    if isinstance(val, (int, float)):
+                        sums[key] += float(val)
+        sums = {k: round(v, 2) for k, v in sums.items()}
         series.append({"month": block["month"], **sums})
 
     latest = series[-1] if series else {}
@@ -149,21 +169,6 @@ def build_summary(wb) -> dict:
         "latestNetInflow": latest.get("net_inflow", 0),
         "latestNetAum": latest.get("net_aum", 0),
     }
-
-
-def total_metric_value(ws, col: int | None) -> float:
-    total_row = find_total_row(ws)
-    if total_row and col:
-        value = ws.cell(total_row, col).value
-        return float(value) if isinstance(value, (int, float)) else 0
-    return sum_number_column(ws, col)
-
-
-def find_total_row(ws) -> int | None:
-    for row in range(DATA_START_ROW, ws.max_row + 1):
-        if norm_key(ws.cell(row, 1).value) == "grand total":
-            return row
-    return None
 
 
 def flat_sheet(wb):
@@ -333,21 +338,30 @@ def ensure_flat_month(ws, month_info: dict) -> dict:
         return existing
 
     latest = month_blocks(ws)[-1]
+
+    # Source positions in the latest block's trailing section
+    latest_sep_after = latest["end"] + 1
+    latest_cum = latest_sep_after + 1
+    latest_sep_mid = latest_cum + 2
+    latest_grw = latest_sep_mid + 1
+
+    # Layout for the new block
     start = ws.max_column + 1
     sep_col = start
     block_start = start + 1
     block_end = block_start + len(METRIC_ORDER) - 1
     cumulative_start = block_end + 2
     growth_start = cumulative_start + 3
-    total_end = growth_start + 2
 
+    # Copy entire columns (values + styles + fills + number formats) from correct sources
     copy_columns(ws, latest["separator"] or latest["start"] - 1, sep_col, 1)
     copy_columns(ws, latest["start"], block_start, len(METRIC_ORDER))
-    copy_columns(ws, latest["separator"] or latest["start"] - 1, block_end + 1, 1)
-    copy_columns(ws, latest["start"] + 2, cumulative_start, 2)
-    copy_columns(ws, latest["separator"] or latest["start"] - 1, cumulative_start + 2, 1)
-    copy_columns(ws, latest["start"] + 2, growth_start, 3)
+    copy_columns(ws, latest_sep_after, block_end + 1, 1)
+    copy_columns(ws, latest_cum, cumulative_start, 2)
+    copy_columns(ws, latest_sep_mid, cumulative_start + 2, 1)
+    copy_columns(ws, latest_grw, growth_start, 3)
 
+    # Set header text (values only — fills/formats already copied)
     fill_month_headers(ws, block_start, month_info)
     ws.cell(MONTH_ROW, sep_col).value = "-"
     ws.cell(HEADER_ROW, sep_col).value = "-"
@@ -365,7 +379,7 @@ def ensure_flat_month(ws, month_info: dict) -> dict:
     ws.cell(MONTH_ROW, growth_start + 2).value = "-"
     ws.cell(HEADER_ROW, growth_start + 2).value = f"AUM - Growth-({latest['month']} Vs {month_info['key']})"
 
-    recreate_flat_header_merges(ws, latest, block_start, cumulative_start)
+    recreate_flat_header_merges(ws, latest, block_start, cumulative_start, latest_cum)
 
     new_block = {"month": month_info["key"], "start": block_start, "end": block_end, "separator": sep_col}
     write_flat_formulas(ws, new_block, latest, cumulative_start, growth_start)
@@ -465,11 +479,12 @@ def fill_month_headers(ws, block_start: int, month_info: dict) -> None:
         ws.cell(HEADER_ROW, block_start + offset).value = metric_label(metric, month_info)
 
 
-def recreate_flat_header_merges(ws, previous_block: dict, month_start_col: int, summary_start_col: int) -> None:
+def recreate_flat_header_merges(ws, previous_block: dict, month_start_col: int, summary_start_col: int, source_cum_col: int | None = None) -> None:
+    source_cum = source_cum_col or (previous_block["start"] + 10)
     apply_merged_header(ws, 1, month_start_col, month_start_col + 8, previous_block["start"])
     apply_merged_header(ws, 2, month_start_col, month_start_col + 8, previous_block["start"])
-    apply_merged_header(ws, 1, summary_start_col, summary_start_col + 1, previous_block["start"] + 10)
-    apply_merged_header(ws, 2, summary_start_col, summary_start_col + 1, previous_block["start"] + 10)
+    apply_merged_header(ws, 1, summary_start_col, summary_start_col + 1, source_cum)
+    apply_merged_header(ws, 2, summary_start_col, summary_start_col + 1, source_cum)
 
 
 def apply_merged_header(ws, row: int, start_col: int, end_col: int, source_col: int) -> None:
