@@ -73,6 +73,23 @@ METRIC_LABELS = {
     "seg_aum": "Net Assets Under Management in segregated portfolio as on {date} (INR in crore)",
 }
 
+# Sub-total / total rows in the AMFI form sheet and the row-ranges each one
+# aggregates.  The pattern is identical across every monthly block — only the
+# column letter changes.  Extracted from the company template.
+_FORM_SUBTOTAL_ROWS = {
+    22: [(6, 21)],                                           # Sub Total - I
+    36: [(25, 35)],                                          # Sub Total - II
+    45: [(39, 44)],                                          # Sub Total - III
+    50: [(48, 49)],                                          # Sub Total - IV
+    57: [(53, 56)],                                          # Sub Total - V
+    59: [(6, 21), (25, 35), (39, 44), (48, 49), (53, 56)],   # Total A — Open ended
+    67: [(63, 66)],                                          # Sub Total (close-ended)
+    72: [(70, 71)],                                          # Sub Total (close-ended)
+    76: [(63, 66), (70, 71), (74, 74)],                      # Total B — Close ended
+    85: [(79, 83)],                                          # Total C — Interval
+    87: [(59, 59), (76, 76), (85, 85)],                      # Grand Total
+}
+
 
 
 def template_bytes() -> bytes:
@@ -433,9 +450,13 @@ def update_form_sheet(ws, records: list[dict], block: dict) -> list[str]:
     sr_col = block["start"]
     records_by_scheme = {norm_key(record["scheme"]): record for record in records}
 
+    # Write individual scheme data — skip aggregate / sub-total rows so we
+    # don't overwrite their cells with zeros before formulas are applied.
     for scheme_key, row_indexes in rows.items():
         record = records_by_scheme.get(scheme_key)
         for row_idx in row_indexes:
+            if row_idx in _FORM_SUBTOTAL_ROWS or is_aggregate_scheme(ws.cell(row_idx, scheme_col).value or ""):
+                continue
             for offset, metric in enumerate(METRIC_ORDER):
                 ws.cell(row_idx, metric_start + offset).value = metric_cell_value(record, metric)
 
@@ -450,9 +471,29 @@ def update_form_sheet(ws, records: list[dict], block: dict) -> list[str]:
             rows[norm_key(record["scheme"])] = row_indexes
             warnings.append(f"Added new fund category to AMFI form sheet: {record['scheme']}")
         for row_idx in row_indexes:
+            if row_idx in _FORM_SUBTOTAL_ROWS:
+                continue
             for offset, metric in enumerate(METRIC_ORDER):
                 ws.cell(row_idx, metric_start + offset).value = metric_cell_value(record, metric)
+
+    # Generate SUM formulas for sub-total / total / grand-total rows
+    write_form_subtotal_formulas(ws, metric_start)
     return warnings
+
+
+def write_form_subtotal_formulas(ws, metric_start: int) -> None:
+    """Write SUM formulas for every sub-total row in the form sheet.
+
+    Each metric column in the block gets a formula like
+    ``=SUM(XX6:XX21)`` or ``=SUM(XX6:XX21) + SUM(XX25:XX35) + …``
+    where XX is the column letter for that metric.
+    """
+    for summary_row, row_ranges in _FORM_SUBTOTAL_ROWS.items():
+        for offset in range(len(METRIC_ORDER)):
+            col = metric_start + offset
+            col_letter = get_column_letter(col)
+            parts = [f"SUM({col_letter}{r1}:{col_letter}{r2})" for r1, r2 in row_ranges]
+            ws.cell(summary_row, col).value = "=" + " + ".join(parts)
 
 
 def insert_flat_record(ws, record: dict) -> int:
