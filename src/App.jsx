@@ -11,13 +11,14 @@ import {
     YAxis,
 } from 'recharts';
 
-const API = 'http://127.0.0.1:8000';
+const API = import.meta.env.VITE_API_URL || window.location.origin;
 
 const tabs = [
     { id: 'overview', label: 'Overview' },
     { id: 'sip', label: 'SIP Analysis' },
     { id: 'flat', label: 'Fund Flows (Flat)' },
     { id: 'form', label: 'AMFI Form Layout' },
+    { id: 'archives', label: 'Archives' },
 ];
 
 const sheetNames = {
@@ -74,14 +75,14 @@ function sipSheet(data) {
 }
 
 function flatSheet(data) {
-    return findSheet(data, name => name.startsWith(sheetNames.flatPrefix) && !name.endsWith(sheetNames.formSuffix));
+    return findSheet(data, name => name.startsWith("AMFI-Mar") && !name.endsWith(sheetNames.formSuffix));
 }
 
 function formSheet(data) {
-    return findSheet(data, name => name.startsWith(sheetNames.flatPrefix) && name.endsWith(sheetNames.formSuffix));
+    return findSheet(data, name => name.startsWith("AMFI-Mar") && name.endsWith(sheetNames.formSuffix));
 }
 
-function Section({ title, subtitle, children, id }) {
+function Section({ title, subtitle, headerAction, children, id }) {
     return (
         <section className="card" id={id}>
             <div className="card-header">
@@ -89,6 +90,7 @@ function Section({ title, subtitle, children, id }) {
                     <h2>{title}</h2>
                     {subtitle && <p className="card-subtitle">{subtitle}</p>}
                 </div>
+                {headerAction && <div className="card-header-action">{headerAction}</div>}
             </div>
             <div className="card-body">{children}</div>
         </section>
@@ -138,7 +140,7 @@ function CustomTooltip({ active, payload, label }) {
     );
 }
 
-function Overview({ data, loading, onUpload, onRefresh }) {
+function Overview({ data, loading, onUpload, onRefresh, selectedFY = '' }) {
     const inputRef = useRef(null);
     const [fileName, setFileName] = useState('');
     const summary = data?.summary || {};
@@ -149,11 +151,16 @@ function Overview({ data, loading, onUpload, onRefresh }) {
         if (!file) return;
         setFileName(file.name);
         await onUpload(file);
+        if (inputRef.current) inputRef.current.value = "";
+        setFileName("");
     }
 
     return (
         <>
-            <Section title="Command Center" subtitle="Monthly ingestion, workbook streaming, and portfolio telemetry.">
+            <Section 
+                title="AMFI Ingestion" 
+                subtitle="Upload monthly data sheets and trigger rollover baselines."
+            >
                 <div className="upload-row">
                     <label className="file-input">
                         <FileUp size={18} />
@@ -169,7 +176,7 @@ function Overview({ data, loading, onUpload, onRefresh }) {
                         {loading ? <span className="spinner" /> : <FileUp size={18} />}
                         Upload Monthly AMFI Report
                     </button>
-                    <button className="btn-sm" onClick={onRefresh} disabled={loading} title="Refresh data">
+                    <button className="btn-sm" onClick={() => onRefresh(selectedFY)} disabled={loading} title="Refresh data">
                         <RefreshCw size={16} />
                     </button>
                 </div>
@@ -231,24 +238,103 @@ function SheetTab({ title, subtitle, sheet }) {
     );
 }
 
+function ArchivesView({ archives, loading, onRefresh }) {
+    return (
+        <Section title="Finalized Archives" subtitle="Available fiscal years compiled dynamically from the SQLite database layer.">
+            <div className="archives-header">
+                <button className="btn-primary" onClick={onRefresh} disabled={loading}>
+                    <RefreshCw size={16} className={loading ? "spinner" : ""} />
+                    Refresh Archives
+                </button>
+            </div>
+            
+            {archives.length === 0 ? (
+                <div className="empty-state">No archived financial years found.</div>
+            ) : (
+                <div className="table-scroll">
+                    <table className="theory-table" style={{ width: "100%" }}>
+                        <thead>
+                            <tr>
+                                <th>Financial Year</th>
+                                <th>Record Count</th>
+                                <th>Status</th>
+                                <th>Last Modified</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {archives.map(arch => (
+                                <tr key={arch.financial_year}>
+                                    <td><strong>FY {arch.financial_year}</strong></td>
+                                    <td>{arch.record_count} metrics rows</td>
+                                    <td>
+                                        <span className={`status-badge ${arch.status.toLowerCase().replace(' ', '-')}`}>
+                                            {arch.status}
+                                        </span>
+                                    </td>
+                                    <td>{new Date(arch.last_modified).toLocaleString('en-IN')}</td>
+                                    <td>
+                                        <a 
+                                            href={`${API}/api/download?financial_year=${arch.financial_year}`} 
+                                            className="btn-download-archive"
+                                            title={`Download FY ${arch.financial_year} Workbook`}
+                                        >
+                                            <Download size={16} />
+                                            <span style={{ marginLeft: "6px" }}>Download Excel</span>
+                                        </a>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </Section>
+    );
+}
+
 export default function App() {
     const [activeTab, setActiveTab] = useState('overview');
     const [data, setData] = useState(null);
+    const [archives, setArchives] = useState([]);
+    const [selectedFY, setSelectedFY] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     const [isDarkMode, setIsDarkMode] = useState(true);
 
-    async function loadData() {
+    async function loadData(fy) {
         setLoading(true);
         setError('');
         try {
-            const res = await fetch(`${API}/dashboard-data`);
-            if (!res.ok) throw new Error(await res.text());
-            setData(await res.json());
+            const url = fy ? `${API}/dashboard-data?financial_year=${fy}` : `${API}/dashboard-data`;
+            const res = await fetch(url);
+            const payload = await res.json();
+            if (!res.ok) throw new Error(payload.detail || 'Unable to load dashboard data.');
+            setData(payload);
+            if (payload?.financialYear) {
+                setSelectedFY(payload.financialYear);
+            }
         } catch (err) {
             setError(err.message || 'Unable to load dashboard data.');
         } finally {
             setLoading(false);
+        }
+    }
+
+    async function loadArchives() {
+        try {
+            const res = await fetch(`${API}/api/archives`);
+            if (res.ok) {
+                const list = await res.json();
+                setArchives(list);
+                if (list.length > 0 && !selectedFY) {
+                    const latest = list[0].financial_year;
+                    setSelectedFY(latest);
+                    loadData(latest);
+                }
+            }
+        } catch (err) {
+            console.error("Failed to load archives list:", err);
         }
     }
 
@@ -262,6 +348,10 @@ export default function App() {
             const payload = await res.json();
             if (!res.ok) throw new Error(payload.detail || 'Upload failed.');
             setData(payload);
+            if (payload.financialYear) {
+                setSelectedFY(payload.financialYear);
+            }
+            loadArchives();
         } catch (err) {
             setError(err.message || 'Upload failed.');
         } finally {
@@ -270,12 +360,16 @@ export default function App() {
     }
 
     useEffect(() => {
-        loadData();
+        loadArchives().then(() => {
+            if (!selectedFY) {
+                loadData();
+            }
+        });
     }, []);
 
     const content = useMemo(() => {
         if (activeTab === 'overview') {
-            return <Overview data={data} loading={loading} onUpload={uploadFile} onRefresh={loadData} />;
+            return <Overview data={data} loading={loading} onUpload={uploadFile} onRefresh={loadData} selectedFY={selectedFY} />;
         }
         if (activeTab === 'sip') {
             return <SheetTab title="SIP Analysis" subtitle="Full historical SIP contribution table." sheet={sipSheet(data)} />;
@@ -283,8 +377,14 @@ export default function App() {
         if (activeTab === 'flat') {
             return <SheetTab title="Fund Flows (Flat)" subtitle="Scheme-level horizontal master table with all monthly metric blocks." sheet={flatSheet(data)} />;
         }
-        return <SheetTab title="AMFI Form Layout" subtitle="Regulatory AMFI-style monthly blocks retained in their native structure." sheet={formSheet(data)} />;
-    }, [activeTab, data, loading]);
+        if (activeTab === 'form') {
+            return <SheetTab title="AMFI Form Layout" subtitle="Regulatory AMFI-style monthly blocks retained in their native structure." sheet={formSheet(data)} />;
+        }
+        if (activeTab === 'archives') {
+            return <ArchivesView archives={archives} loading={loading} onRefresh={loadArchives} />;
+        }
+        return null;
+    }, [activeTab, data, archives, loading, selectedFY]);
 
     return (
         <div className={`app-layout ${isDarkMode ? 'dark-theme' : 'light-theme'}`}>
@@ -305,21 +405,57 @@ export default function App() {
                         <h1>AMFI Dashboard</h1>
                         <p>Centralized monthly ingestion and time-series review for mutual fund category data.</p>
                     </div>
-                    <button
-                        className="theme-toggle"
-                        onClick={() => setIsDarkMode(value => !value)}
-                        title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-                        aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-                    >
-                        {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
-                    </button>
+                    {archives.length > 0 && (
+                        <div className="header-controls">
+                            <label htmlFor="fy-select-control" style={{ fontWeight: '700', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                Active FY:
+                            </label>
+                            <select
+                                id="fy-select-control"
+                                className="fy-select"
+                                value={selectedFY}
+                                onChange={e => {
+                                    const nextFY = e.target.value;
+                                    setSelectedFY(nextFY);
+                                    loadData(nextFY);
+                                }}
+                            >
+                                {archives.map(a => (
+                                    <option key={a.financial_year} value={a.financial_year}>
+                                        FY {a.financial_year}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
                 </header>
-                {error ? <div className="error-banner">{error}</div> : null}
+                {error ? (
+                    <div className="error-banner" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderLeft: '4px solid #ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444' }}>
+                        <span style={{ fontWeight: '600' }}>Error: {error}</span>
+                        <button 
+                            onClick={() => setError('')} 
+                            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontWeight: 'bold', fontSize: '1.2rem', marginLeft: '10px' }}
+                            title="Dismiss error"
+                        >
+                            &times;
+                        </button>
+                    </div>
+                ) : null}
                 <div className="page-content">{content}</div>
             </main>
-            <a className="download-fab" href={`${API}/download`} title="Download updated workbook">
-                <Download size={19} />
-            </a>
+            <button
+                className="theme-toggle"
+                onClick={() => setIsDarkMode(value => !value)}
+                title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+                {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+            {selectedFY && (
+                <a className="download-fab" href={`${API}/api/download?financial_year=${selectedFY}`} title={`Download FY ${selectedFY} workbook`}>
+                    <Download size={19} />
+                </a>
+            )}
         </div>
     );
 }
