@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Download, FileUp, Moon, RefreshCw, Sun } from 'lucide-react';
+import { Download, FileUp, Moon, RefreshCw, Sun, ChevronRight } from 'lucide-react';
 import {
     CartesianGrid,
     Legend,
@@ -11,7 +11,10 @@ import {
     YAxis,
 } from 'recharts';
 
-const API = import.meta.env.VITE_API_URL || window.location.origin;
+const API = import.meta.env.VITE_API_URL || 
+    ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && window.location.port !== '8000'
+        ? 'http://127.0.0.1:8000' 
+        : window.location.origin);
 
 const tabs = [
     { id: 'overview', label: 'Overview' },
@@ -102,6 +105,112 @@ function DataTable({ sheet, limit }) {
     const { columns, rows } = prepareTable(sheet, limit);
     if (!columns.length || !rows.length) return <div className="empty-state">No readable rows found.</div>;
 
+    const [expanded, setExpanded] = useState({});
+
+    function toggleExpand(name) {
+        setExpanded(prev => ({ ...prev, [name]: !prev[name] }));
+    }
+
+    const indexes = columns.map(c => c.index);
+    const isFlat = sheet?.name && sheet.name.startsWith("AMFI-Mar") && !sheet.name.endsWith(sheetNames.formSuffix);
+
+    if (!isFlat) {
+        return (
+            <div className="table-scroll">
+                <table className="theory-table">
+                    <thead>
+                        <tr>
+                            {columns.map(column => (
+                                <th key={column.index} title={column.label}>{column.label}</th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((row, rowIndex) => (
+                            <tr key={rowIndex}>
+                                {row.map((cell, cellIndex) => (
+                                    <td key={cellIndex} className={typeof cell === 'number' ? 'numeric-cell' : undefined}>
+                                        {formatNumber(cell)}
+                                    </td>
+                                ))}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        );
+    }
+
+    const schemeColIdx = columns.findIndex(c => c.label.toLowerCase().includes("scheme name"));
+    const assetTypeColIdx = columns.findIndex(c => c.label.toLowerCase().includes("asset type"));
+    const debtEquityColIdx = columns.findIndex(c => c.label.toLowerCase().includes("debt") && c.label.toLowerCase().includes("equity"));
+    const salesProdColIdx = columns.findIndex(c => c.label.toLowerCase().includes("sales") || c.label.toLowerCase().includes("prod") || c.label.toLowerCase().includes("mis"));
+
+    function isAggregateRow(schemeName) {
+        if (!schemeName) return true;
+        const nameClean = schemeName.trim().toLowerCase();
+        if (nameClean === "" || nameClean === "-" || nameClean === "none") return true;
+        if (nameClean.includes("total") || nameClean.includes("subtotal") || nameClean.includes("sub total")) return true;
+        if (nameClean.includes("growth") || nameClean.includes("fig in cr")) return true;
+        if (nameClean.startsWith("*") || nameClean.startsWith("#") || nameClean.startsWith("@")) return true;
+        if (nameClean.includes("data in respect") || nameClean.includes("include nfo") || nameClean.includes("fundamental attribute")) return true;
+        if (nameClean.includes("fund of funds scheme (domestic)")) return true;
+        return false;
+    }
+
+    function classifyRow(row) {
+        const schemeName = schemeColIdx !== -1 ? String(row[schemeColIdx] || '').trim() : '';
+        const assetType = assetTypeColIdx !== -1 ? String(row[assetTypeColIdx] || '').trim() : '';
+        const debtEquity = debtEquityColIdx !== -1 ? String(row[debtEquityColIdx] || '').trim() : '';
+        const salesProdMis = salesProdColIdx !== -1 ? String(row[salesProdColIdx] || '').trim() : '';
+
+        const nameLower = schemeName.toLowerCase();
+        const assetTypeLower = assetType.toLowerCase();
+        const debtEquityLower = debtEquity.toLowerCase();
+        const salesProdMisLower = salesProdMis.toLowerCase();
+
+        if (schemeName === "Liquid Fund") {
+            return "Liquid";
+        }
+        if (salesProdMis === "Arbitrage") {
+            return "Arbitrage / ESF";
+        }
+        if (nameLower.includes("etf") || nameLower.includes("index") || debtEquityLower.includes("etf") || debtEquityLower.includes("index") || salesProdMisLower.includes("etf") || salesProdMisLower.includes("index")) {
+            return "Passive Equity";
+        }
+        if (assetTypeLower.includes("hybrid") || nameLower.includes("hybrid")) {
+            return "Hybrid";
+        }
+        if (assetTypeLower.includes("equity") || nameLower.includes("equity") || assetTypeLower.includes("growth") || assetTypeLower.includes("solution")) {
+            return "Active Equity";
+        }
+        if (assetTypeLower.includes("debt") || nameLower.includes("debt") || assetTypeLower.includes("income") || nameLower.includes("gilt") || nameLower.includes("bond") || nameLower.includes("treasury") || salesProdMisLower === "td" || salesProdMisLower === "fmp") {
+            return "Debt";
+        }
+        if (debtEquityLower.includes("equity")) return "Active Equity";
+        if (debtEquityLower.includes("debt")) return "Debt";
+        return "Active Equity";
+    }
+
+    const macroCategories = ["Active Equity", "Hybrid", "Passive Equity", "Arbitrage / ESF", "Debt", "Liquid"];
+    const grouped = {};
+    macroCategories.forEach(cat => {
+        grouped[cat] = [];
+    });
+
+    rows.forEach(row => {
+        const schemeName = schemeColIdx !== -1 ? String(row[schemeColIdx] || '').trim() : '';
+        if (isAggregateRow(schemeName)) {
+            return;
+        }
+        const cat = classifyRow(row);
+        if (grouped[cat]) {
+            grouped[cat].push(row);
+        } else {
+            grouped["Active Equity"].push(row);
+        }
+    });
+
     return (
         <div className="table-scroll">
             <table className="theory-table">
@@ -113,15 +222,83 @@ function DataTable({ sheet, limit }) {
                     </tr>
                 </thead>
                 <tbody>
-                    {rows.map((row, rowIndex) => (
-                        <tr key={rowIndex}>
-                            {row.map((cell, cellIndex) => (
-                                <td key={cellIndex} className={typeof cell === 'number' ? 'numeric-cell' : undefined}>
-                                    {formatNumber(cell)}
-                                </td>
-                            ))}
-                        </tr>
-                    ))}
+                    {macroCategories.map(catName => {
+                        const children = grouped[catName];
+                        const isExpanded = !!expanded[catName];
+                        
+                        const parentCells = indexes.map((colIdx, cellIdx) => {
+                            if (cellIdx === 0) return catName;
+                            if (cellIdx >= 1 && cellIdx <= 4) return "";
+                            
+                            const labelLower = columns[cellIdx]?.label?.toLowerCase() || "";
+                            if (labelLower.includes("growth")) return "";
+                            
+                            let sum = 0;
+                            let hasNumbers = false;
+                            let isSeparator = false;
+                            children.forEach(childRow => {
+                                const val = childRow[cellIdx];
+                                if (val === "-") {
+                                    isSeparator = true;
+                                } else if (typeof val === 'number') {
+                                    sum += val;
+                                    hasNumbers = true;
+                                }
+                            });
+                            if (isSeparator) return "-";
+                            return hasNumbers ? Math.round(sum * 100) / 100 : "";
+                        });
+
+                        return (
+                            <React.Fragment key={catName}>
+                                <tr 
+                                    className="group-header-row"
+                                    onClick={() => toggleExpand(catName)}
+                                    style={{ cursor: 'pointer' }}
+                                >
+                                    {parentCells.map((cell, cellIdx) => {
+                                        if (cellIdx === 0) {
+                                            return (
+                                                <td key={cellIdx}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                        <ChevronRight 
+                                                            size={16} 
+                                                            className={`accordion-chevron ${isExpanded ? 'expanded' : ''}`} 
+                                                        />
+                                                        <span>{catName}</span>
+                                                    </div>
+                                                </td>
+                                            );
+                                        }
+                                        return (
+                                            <td key={cellIdx} className={typeof cell === 'number' ? 'numeric-cell' : undefined}>
+                                                {formatNumber(cell)}
+                                            </td>
+                                        );
+                                    })}
+                                </tr>
+                                
+                                {isExpanded && children.map((childRow, childIdx) => (
+                                    <tr key={childIdx}>
+                                        {childRow.map((cell, cellIdx) => {
+                                            if (cellIdx === 0) {
+                                                return (
+                                                    <td key={cellIdx} style={{ paddingLeft: '28px', color: 'var(--text-secondary)' }}>
+                                                        {cell}
+                                                    </td>
+                                                );
+                                            }
+                                            return (
+                                                <td key={cellIdx} className={typeof cell === 'number' ? 'numeric-cell' : undefined}>
+                                                    {formatNumber(cell)}
+                                                </td>
+                                            );
+                                        })}
+                                    </tr>
+                                ))}
+                            </React.Fragment>
+                        );
+                    })}
                 </tbody>
             </table>
         </div>
@@ -140,7 +317,7 @@ function CustomTooltip({ active, payload, label }) {
     );
 }
 
-function Overview({ data, loading, onUpload, onRefresh, selectedFY = '' }) {
+function Overview({ data, loading, onUpload, onRefresh, selectedFY = '', archives = [] }) {
     const inputRef = useRef(null);
     const [fileName, setFileName] = useState('');
     const summary = data?.summary || {};
@@ -160,6 +337,29 @@ function Overview({ data, loading, onUpload, onRefresh, selectedFY = '' }) {
             <Section 
                 title="AMFI Ingestion" 
                 subtitle="Upload monthly data sheets and trigger rollover baselines."
+                headerAction={
+                    archives.length > 0 && (
+                        <div className="header-controls">
+                            <label htmlFor="fy-select-control" style={{ fontWeight: '700', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                Active FY:
+                            </label>
+                            <select
+                                id="fy-select-control"
+                                className="fy-select"
+                                value={selectedFY}
+                                onChange={e => {
+                                    onRefresh(e.target.value);
+                                }}
+                            >
+                                {archives.map(a => (
+                                    <option key={a.financial_year} value={a.financial_year}>
+                                        FY {a.financial_year}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )
+                }
             >
                 <div className="upload-row">
                     <label className="file-input">
@@ -369,7 +569,7 @@ export default function App() {
 
     const content = useMemo(() => {
         if (activeTab === 'overview') {
-            return <Overview data={data} loading={loading} onUpload={uploadFile} onRefresh={loadData} selectedFY={selectedFY} />;
+            return <Overview data={data} loading={loading} onUpload={uploadFile} onRefresh={loadData} selectedFY={selectedFY} archives={archives} />;
         }
         if (activeTab === 'sip') {
             return <SheetTab title="SIP Analysis" subtitle="Full historical SIP contribution table." sheet={sipSheet(data)} />;
@@ -405,29 +605,6 @@ export default function App() {
                         <h1>AMFI Dashboard</h1>
                         <p>Centralized monthly ingestion and time-series review for mutual fund category data.</p>
                     </div>
-                    {archives.length > 0 && (
-                        <div className="header-controls">
-                            <label htmlFor="fy-select-control" style={{ fontWeight: '700', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                                Active FY:
-                            </label>
-                            <select
-                                id="fy-select-control"
-                                className="fy-select"
-                                value={selectedFY}
-                                onChange={e => {
-                                    const nextFY = e.target.value;
-                                    setSelectedFY(nextFY);
-                                    loadData(nextFY);
-                                }}
-                            >
-                                {archives.map(a => (
-                                    <option key={a.financial_year} value={a.financial_year}>
-                                        FY {a.financial_year}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                    )}
                 </header>
                 {error ? (
                     <div className="error-banner" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderLeft: '4px solid #ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444' }}>

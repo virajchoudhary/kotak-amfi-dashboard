@@ -1,13 +1,15 @@
 import calendar
-import io
-import re
-import sqlite3
 from copy import copy
 from datetime import datetime
+import io
 from pathlib import Path
+import re
+import sqlite3
+
 import pandas as pd
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.views import Selection
 
 DB_PATH = Path(__file__).resolve().parent / "amfi.db"
 TEMPLATE_PATH = Path(__file__).resolve().parent / "data" / "AMFI_MOM DATA - Apr'25 to Mar26.xlsx"
@@ -507,7 +509,28 @@ def compile_excel_for_fy(fy: str) -> bytes:
     ws_flat.title = f"AMFI-{baseline_month_key} to {latest_month_key}"
     ws_form.title = f"AMFI-{baseline_month_key} to {latest_month_key}-AMFI form"
     wb.active = wb.worksheets.index(ws_flat)
-    
+    for ws in wb.worksheets:
+        ws.sheet_view.topLeftCell = "A1"
+        pane = ws.sheet_view.pane
+        if pane:
+            x = int(pane.xSplit) if pane.xSplit else 0
+            y = int(pane.ySplit) if pane.ySplit else 0
+            target_cell = f"{get_column_letter(x + 1)}{y + 1}"
+            pane.topLeftCell = target_cell
+        else:
+            target_cell = "A1"
+        
+        if ws.sheet_view.selection:
+            for sel in ws.sheet_view.selection:
+                if sel.pane in (None, 'bottomRight'):
+                    sel.activeCell = target_cell
+                    sel.sqref = target_cell
+                else:
+                    sel.activeCell = "A1"
+                    sel.sqref = "A1"
+        else:
+            ws.sheet_view.selection = [Selection(activeCell=target_cell, sqref=target_cell)]
+
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()

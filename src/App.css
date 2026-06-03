@@ -541,7 +541,11 @@ input { font: inherit; }
 }
 
 @media (max-width: 560px) {
-    .app-header { align-items: flex-start; }
+    .app-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 16px;
+    }
     .kpi-grid { grid-template-columns: 1fr; }
     .file-input { min-width: 100%; }
     .theory-table th,
@@ -633,4 +637,25 @@ input { font: inherit; }
     font-weight: 700;
     color: var(--text-secondary);
     font-size: 0.95rem;
+}
+
+.theory-table tr.group-header-row td {
+    background: var(--table-header-bg) !important;
+    color: var(--table-header-text) !important;
+    font-weight: 800 !important;
+    border-bottom: 2px solid var(--border-strong) !important;
+}
+
+.theory-table tr.group-header-row:hover td {
+    background: var(--table-hover-bg) !important;
+}
+
+.accordion-chevron {
+    transition: transform 0.2s ease;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.accordion-chevron.expanded {
+    transform: rotate(90deg);
 }
