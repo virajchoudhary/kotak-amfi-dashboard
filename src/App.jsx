@@ -140,7 +140,7 @@ function MetricCard({ label, value, detail, tone = 'neutral' }) {
         <div className={`metric-card tone-${tone}`}>
             <span>{label}</span>
             <strong>{value}</strong>
-            {detail && <small>{detail}</small>}
+            <small style={{ visibility: detail ? 'visible' : 'hidden' }}>{detail || '\u00A0'}</small>
         </div>
     );
 }
