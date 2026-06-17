@@ -19,6 +19,7 @@ import {
     Legend,
     Line,
     LineChart,
+    Rectangle,
     ResponsiveContainer,
     Tooltip,
     XAxis,
@@ -41,11 +42,28 @@ const tabs = [
 
 const chartLocale = 'en-IN';
 const lineTooltipCursor = { stroke: 'var(--chart-cursor-line)', strokeWidth: 1 };
-const activeBarStyle = {
-    stroke: '#ffffff',
-    strokeWidth: 2,
-    strokeOpacity: 0.85,
-};
+const categoryFlowSeries = [
+    { name: 'Sales', dataKey: 'monthlySales', color: 'var(--chart-primary)' },
+    { name: 'Redemption', dataKey: 'monthlyRedemption', color: 'var(--chart-danger)' },
+    { name: 'Net Flow', dataKey: 'monthlyNetFlow', color: 'var(--chart-secondary)' },
+];
+const topAumSeries = [
+    { name: 'Latest AUM', dataKey: 'latestAum', color: 'var(--chart-primary)' },
+];
+const sipAnnualSeries = [
+    { name: 'Contribution', dataKey: 'contribution', color: 'var(--chart-primary)' },
+];
+
+function nsComparisonSeries(ns) {
+    return [
+        { name: ns.previousMonth || 'Previous', dataKey: 'previous', color: 'var(--chart-danger)' },
+        { name: ns.currentMonth || 'Current', dataKey: 'current', color: 'var(--chart-primary)' },
+    ];
+}
+
+function renderActiveBar(props) {
+    return <Rectangle {...props} stroke="#fff" strokeWidth={2} strokeOpacity={0.85} />;
+}
 
 function formatNumber(value, digits = 2) {
     if (typeof value !== 'number' || Number.isNaN(value)) return value ?? '';
@@ -276,13 +294,29 @@ function GlassSelect({ icon, value, options, onChange, ariaLabel = 'Select optio
     );
 }
 
-function ChartTooltip({ active, payload, label }) {
+function tooltipTitleFromPayload(payload, label, titleKey) {
+    const data = payload?.[0]?.payload;
+    if (titleKey && data?.[titleKey] != null) return data[titleKey];
+    return data?.category || data?.schemeName || data?.financialYear || data?.label || data?.month || label;
+}
+
+function ChartTooltip({ active, payload, label, titleKey, series }) {
     if (!active || !payload?.length) return null;
-    const rows = payload.filter(item => item?.value !== undefined && item?.value !== null);
+    const data = payload[0]?.payload || {};
+    const rows = Array.isArray(series) && series.length
+        ? series
+            .map(item => ({
+                ...item,
+                value: data[item.dataKey],
+                color: item.color,
+            }))
+            .filter(item => item.value !== undefined && item.value !== null)
+        : payload.filter(item => item?.value !== undefined && item?.value !== null);
     if (!rows.length) return null;
+    const title = tooltipTitleFromPayload(payload, label, titleKey);
     return (
         <div className="chart-tooltip">
-            <strong className="chart-tooltip-title">{label}</strong>
+            <strong className="chart-tooltip-title">{title}</strong>
             {rows.map(item => (
                 <div className="chart-tooltip-row" key={`${item.dataKey}-${item.name}`}>
                     <span className="chart-tooltip-series">
@@ -395,7 +429,7 @@ function Overview({ data, loading, isUploading, onUpload, onRefresh, selectedFY,
                                         height={44}
                                     />
                                     <YAxis stroke="var(--chart-axis)" tickMargin={10} width={78} tickFormatter={value => formatCrore(value)} />
-                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} />
+                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} isAnimationActive={false} />
                                     <Area name="Net AUM" type="monotone" dataKey="net_aum" stroke="var(--chart-primary)" fill="var(--chart-fill)" strokeWidth={2.2} isAnimationActive={false} />
                                 </AreaChart>
                             </ResponsiveContainer>
@@ -419,7 +453,7 @@ function Overview({ data, loading, isUploading, onUpload, onRefresh, selectedFY,
                                         height={44}
                                     />
                                     <YAxis stroke="var(--chart-axis)" tickMargin={10} width={78} tickFormatter={value => formatCrore(value)} />
-                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} />
+                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} isAnimationActive={false} />
                                     <Legend />
                                     <Line name="Sales" type="monotone" dataKey="funds_mobilized" stroke="var(--chart-primary)" strokeWidth={2.2} dot={false} isAnimationActive={false} />
                                     <Line name="Redemption" type="monotone" dataKey="redemption" stroke="var(--chart-danger)" strokeWidth={2.2} dot={false} isAnimationActive={false} />
@@ -501,11 +535,15 @@ function CategoriesView({ data }) {
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
                                 <XAxis dataKey="category" stroke="var(--chart-axis)" interval={0} tickMargin={10} height={70} />
                                 <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                <Tooltip content={<ChartTooltip />} cursor={false} shared={false} />
+                                <Tooltip
+                                    content={<ChartTooltip titleKey="category" series={categoryFlowSeries} />}
+                                    cursor={false}
+                                    isAnimationActive={false}
+                                />
                                 <Legend />
-                                <Bar name="Sales" dataKey="monthlySales" fill="var(--chart-primary)" activeBar={activeBarStyle} isAnimationActive={false} />
-                                <Bar name="Redemption" dataKey="monthlyRedemption" fill="var(--chart-danger)" activeBar={activeBarStyle} isAnimationActive={false} />
-                                <Bar name="Net Flow" dataKey="monthlyNetFlow" fill="var(--chart-secondary)" activeBar={activeBarStyle} isAnimationActive={false} />
+                                <Bar name="Sales" dataKey="monthlySales" fill="var(--chart-primary)" activeBar={renderActiveBar} isAnimationActive={false} />
+                                <Bar name="Redemption" dataKey="monthlyRedemption" fill="var(--chart-danger)" activeBar={renderActiveBar} isAnimationActive={false} />
+                                <Bar name="Net Flow" dataKey="monthlyNetFlow" fill="var(--chart-secondary)" activeBar={renderActiveBar} isAnimationActive={false} />
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
@@ -617,8 +655,12 @@ function SchemesView({ data }) {
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
                                 <XAxis type="number" stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} />
                                 <YAxis type="category" dataKey="schemeName" stroke="var(--chart-axis)" width={132} />
-                                <Tooltip content={<ChartTooltip />} cursor={false} shared={false} />
-                                <Bar name="Latest AUM" dataKey="latestAum" fill="var(--chart-primary)" activeBar={activeBarStyle} isAnimationActive={false} />
+                                <Tooltip
+                                    content={<ChartTooltip titleKey="schemeName" series={topAumSeries} />}
+                                    cursor={false}
+                                    isAnimationActive={false}
+                                />
+                                <Bar name="Latest AUM" dataKey="latestAum" fill="var(--chart-primary)" activeBar={renderActiveBar} isAnimationActive={false} />
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
@@ -697,7 +739,7 @@ function SipView({ data }) {
                                         textAnchor="end"
                                     />
                                     <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} />
+                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} isAnimationActive={false} />
                                     <Line name="Contribution" type="monotone" dataKey="contribution" stroke="var(--chart-primary)" strokeWidth={2.2} dot={false} isAnimationActive={false} />
                                 </LineChart>
                             </ResponsiveContainer>
@@ -722,7 +764,7 @@ function SipView({ data }) {
                                         textAnchor="end"
                                     />
                                     <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} />
+                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} isAnimationActive={false} />
                                     <Area name="SIP AUM" type="monotone" dataKey="aum" stroke="var(--chart-secondary)" fill="var(--chart-fill)" strokeWidth={2.2} isAnimationActive={false} />
                                 </AreaChart>
                             </ResponsiveContainer>
@@ -739,8 +781,12 @@ function SipView({ data }) {
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
                                 <XAxis dataKey="financialYear" stroke="var(--chart-axis)" tickMargin={10} interval={0} />
                                 <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                <Tooltip content={<ChartTooltip />} cursor={false} shared={false} />
-                                <Bar name="Contribution" dataKey="contribution" fill="var(--chart-primary)" activeBar={activeBarStyle} isAnimationActive={false} />
+                                <Tooltip
+                                    content={<ChartTooltip titleKey="financialYear" series={sipAnnualSeries} />}
+                                    cursor={false}
+                                    isAnimationActive={false}
+                                />
+                                <Bar name="Contribution" dataKey="contribution" fill="var(--chart-primary)" activeBar={renderActiveBar} isAnimationActive={false} />
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
@@ -837,10 +883,14 @@ function NsAnalysisView({ data }) {
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
                                 <XAxis dataKey="label" stroke="var(--chart-axis)" tickMargin={10} interval={0} />
                                 <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                <Tooltip content={<ChartTooltip />} cursor={false} shared={false} />
+                                <Tooltip
+                                    content={<ChartTooltip titleKey="label" series={nsComparisonSeries(ns)} />}
+                                    cursor={false}
+                                    isAnimationActive={false}
+                                />
                                 <Legend />
-                                <Bar name={ns.previousMonth || 'Previous'} dataKey="previous" fill="var(--chart-danger)" activeBar={activeBarStyle} isAnimationActive={false} />
-                                <Bar name={ns.currentMonth || 'Current'} dataKey="current" fill="var(--chart-primary)" activeBar={activeBarStyle} isAnimationActive={false} />
+                                <Bar name={ns.previousMonth || 'Previous'} dataKey="previous" fill="var(--chart-danger)" activeBar={renderActiveBar} isAnimationActive={false} />
+                                <Bar name={ns.currentMonth || 'Current'} dataKey="current" fill="var(--chart-primary)" activeBar={renderActiveBar} isAnimationActive={false} />
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
