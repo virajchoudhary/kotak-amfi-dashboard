@@ -5,9 +5,12 @@ from copy import copy
 from datetime import datetime
 from functools import lru_cache
 import io
+import logging
+import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import zipfile
 
 import pandas as pd
@@ -19,9 +22,12 @@ from openpyxl.worksheet.views import Selection
 
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BACKEND_DIR.parent
-DB_PATH = BACKEND_DIR / "amfi.db"
 TEMPLATE_PATH = BACKEND_DIR / "data" / "template file.xlsx"
 SIP_HISTORY_PATH = Path(__file__).resolve().parent / "data" / "sip_history.csv"
+_UPLOAD_LOCK = threading.Lock()
+_DASHBOARD_CACHE: dict[str, tuple] = {}
+_DASHBOARD_CACHE_LOCK = threading.Lock()
+LOGGER = logging.getLogger("amfi_dashboard.excel_engine")
 SHEET_SIP = "AMFI-SIP"
 SHEET_FLAT = "AMFI-Mar'25 to Mar'26"
 SHEET_FORM = "AMFI-Mar'25 to Jan'26-AMFI form"
@@ -113,8 +119,25 @@ _FORM_SUBTOTAL_ROWS = {
     87: [(59, 59), (76, 76), (85, 85)],
 }
 
+def database_path() -> Path:
+    configured = os.getenv("AMFI_DB_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return BACKEND_DIR / "amfi.db"
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+DB_PATH = database_path()
+
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    db_path = database_path()
+    if not db_path.parent.exists():
+        raise RuntimeError(f"Database directory does not exist: {db_path.parent}")
+    conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -385,8 +408,11 @@ def process_upload_db(upload_bytes: bytes, filename: str) -> tuple[str, list[str
     year = month_info["year"]
     fy = get_financial_year(month, year)
 
-    conn = get_db_connection()
+    _UPLOAD_LOCK.acquire()
+    conn = None
     try:
+        conn = get_db_connection()
+        conn.execute("BEGIN IMMEDIATE")
         cursor = conn.cursor()
 
         if month == 4:
@@ -481,21 +507,25 @@ def process_upload_db(upload_bytes: bytes, filename: str) -> tuple[str, list[str
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         """, insert_records)
 
-        conn.commit()
-        validation_errors = validate_uploaded_month_against_generated(fy, month, year, rows)
+        validation_errors = validate_uploaded_month_against_generated(fy, month, year, rows, conn=conn)
         if validation_errors:
             preview = "; ".join(validation_errors[:8])
             suffix = f" (+{len(validation_errors) - 8} more)" if len(validation_errors) > 8 else ""
             raise ValueError(f"Generated workbook reconciliation failed for {month_info['key']}: {preview}{suffix}")
+        conn.commit()
         return month_info["key"], warnings
     except ValueError:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         raise
     except Exception as e:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         raise ValueError(f"Database error during ingestion: {str(e)}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        _UPLOAD_LOCK.release()
 
 def extract_column_styles(ws, start_col: int, count: int) -> tuple[list[float], list[list[dict]]]:
     widths = []
@@ -696,6 +726,17 @@ def _add_styled_column(ws, style_ws, target_col: int, source_col: int) -> None:
     ws.column_dimensions[target_letter].width = style_ws.column_dimensions[source_letter].width
     for row in range(1, HEADER_ROW + 1):
         copy_cell_style(style_ws.cell(row, source_col), ws.cell(row, target_col))
+
+def _flat_separator_source_col(style_ws, fallback_col: int) -> int:
+    candidates = []
+    for col in range(1, style_ws.max_column + 1):
+        if style_ws.cell(2, col).value == "-" and style_ws.cell(3, col).value == "-":
+            width = style_ws.column_dimensions[get_column_letter(col)].width
+            if width is None or width <= 3:
+                candidates.append(col)
+    if not candidates:
+        return fallback_col
+    return min(candidates, key=lambda col: abs(col - fallback_col))
 
 def _entry_from_record(record: dict) -> dict:
     entry = {
@@ -945,7 +986,10 @@ def _rebuild_flat_sheet(wb, style_wb, records_by_seq: dict[int, list[dict]], sor
         ws.delete_rows(DATA_START_ROW, ws.max_row - DATA_START_ROW + 1)
 
     for index, spec in enumerate(specs, start=7):
-        _add_styled_column(ws, style_ws, index, min(spec["source_col"], style_max_col))
+        source_col = min(spec["source_col"], style_max_col)
+        if spec["kind"] == "separator":
+            source_col = _flat_separator_source_col(style_ws, source_col)
+        _add_styled_column(ws, style_ws, index, source_col)
     _set_dynamic_headers(ws, specs, records_by_seq, sorted_seqs, start_year)
 
     detail_end, grand_total_source = _template_detail_bounds(style_ws)
@@ -1706,34 +1750,18 @@ def _reset_sheet_view(ws) -> None:
     selections.append(Selection(pane="bottomRight", activeCell=top_left, sqref=top_left))
     ws.sheet_view.selection = selections
 
-def compile_excel_for_fy(fy: str) -> bytes:
-    conn = get_db_connection()
+def compile_excel_for_fy(fy: str, conn: sqlite3.Connection | None = None) -> bytes:
+    owns_connection = conn is None
+    if conn is None:
+        conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM amfi_metrics WHERE financial_year = ?", (fy,))
         records = [dict(row) for row in cursor.fetchall()]
         start_year = int(fy.split("-")[0])
-        if not records:
-            cursor.execute(
-                "SELECT * FROM amfi_metrics WHERE month = 3 AND year = ? ORDER BY financial_year DESC",
-                (start_year,),
-            )
-            baseline = [dict(row) for row in cursor.fetchall()]
-            for row in baseline:
-                row.pop("id", None)
-                row.pop("last_modified", None)
-                row["financial_year"] = fy
-                columns = list(row.keys())
-                placeholders = ",".join("?" for _ in columns)
-                cursor.execute(
-                    f"INSERT OR IGNORE INTO amfi_metrics ({','.join(columns)}) VALUES ({placeholders})",
-                    tuple(row[column] for column in columns),
-                )
-            conn.commit()
-            cursor.execute("SELECT * FROM amfi_metrics WHERE financial_year = ?", (fy,))
-            records = [dict(row) for row in cursor.fetchall()]
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
     if not records:
         raise ValueError(f"No records found in database for fiscal year: {fy}")
@@ -1770,6 +1798,45 @@ def compile_excel_for_fy(fy: str) -> bytes:
     wb.save(out)
     style_wb.close()
     return _sanitize_xlsx_package(out.getvalue())
+
+def _fy_data_version(fy: str) -> tuple:
+    """Cheap fingerprint of a financial year's rows, used to invalidate the cache."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(last_modified), '') FROM amfi_metrics WHERE financial_year = ?",
+            (fy,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return (row[0], row[1])
+
+def compile_dashboard_payload(fy: str) -> dict:
+    """Read-only dashboard payload for GET endpoints.
+
+    Compiling the workbook and re-parsing it into JSON is expensive (several
+    seconds), so the result is memoized per financial year and only recomputed
+    when that year's rows change. The payload shape is identical to
+    ``dashboard_payload``; this never mutates the database.
+    """
+    version = _fy_data_version(fy)
+    cached = _DASHBOARD_CACHE.get(fy)
+    if cached and cached[0] == version:
+        return cached[1]
+    excel_bytes = compile_excel_for_fy(fy)
+    payload = dashboard_payload(excel_bytes, fy=fy)
+    payload["financialYear"] = fy
+    with _DASHBOARD_CACHE_LOCK:
+        _DASHBOARD_CACHE[fy] = (version, payload)
+    return payload
+
+def invalidate_dashboard_cache(fy: str | None = None) -> None:
+    """Drop cached dashboard payloads; called after a successful upload."""
+    with _DASHBOARD_CACHE_LOCK:
+        if fy is None:
+            _DASHBOARD_CACHE.clear()
+        else:
+            _DASHBOARD_CACHE.pop(fy, None)
 
 def _compile_excel_for_fy_legacy(fy: str) -> bytes:
     conn = get_db_connection()
@@ -2701,10 +2768,16 @@ def _compare_metric_cells(
         if not _close_enough(expected, actual):
             errors.append(f"{label} {metric}: expected {expected}, got {actual}")
 
-def validate_uploaded_month_against_generated(fy: str, month: int, year: int, source_rows: list[dict]) -> list[str]:
+def validate_uploaded_month_against_generated(
+    fy: str,
+    month: int,
+    year: int,
+    source_rows: list[dict],
+    conn: sqlite3.Connection | None = None,
+) -> list[str]:
     if not source_rows:
         return []
-    workbook_bytes = compile_excel_for_fy(fy)
+    workbook_bytes = compile_excel_for_fy(fy, conn=conn)
     wb = load_workbook(io.BytesIO(workbook_bytes), data_only=False)
     errors: list[str] = []
     try:
@@ -2757,7 +2830,7 @@ def build_summary(wb, fy: str | None = None) -> dict:
         try:
             return build_summary_db(fy, wb)
         except Exception:
-            pass
+            LOGGER.warning("Falling back to workbook-derived summary for %s", fy, exc_info=True)
 
     flat = flat_sheet(wb)
     blocks = month_blocks(flat)
@@ -2815,7 +2888,7 @@ def parse_upload(upload_bytes: bytes, filename: str) -> tuple[list[dict], dict, 
         if header_row and "scheme" in columns and len([k for k in columns if k in METRIC_ORDER]) >= 3:
             candidates.append((ws, header_row, columns))
     if not candidates:
-        return [], infer_month(filename, ""), ["No upload sheet contained a recognizable AMFI metric header row."]
+        raise ValueError("No upload sheet contained a recognizable AMFI metric header row.")
 
     ws, header_row, columns = max(candidates, key=lambda item: item[0].max_row * len(item[2]))
     header_text = " ".join(str(ws.cell(header_row, c).value or "") for c in range(1, ws.max_column + 1))
@@ -2832,6 +2905,8 @@ def read_upload_workbook(upload_bytes: bytes):
         try:
             frames = pd.read_excel(file_bytes, sheet_name=None, header=None, engine="xlrd")
         except Exception:
+            if not _env_bool("AMFI_ALLOW_HTML_UPLOAD", default=False):
+                raise ValueError("Uploaded file is not a readable Excel workbook.")
             file_bytes.seek(0)
             frames = {"Upload": pd.read_html(file_bytes)[0]}
     return frames_to_workbook(frames)
@@ -3003,8 +3078,7 @@ def infer_month(filename: str, text: str) -> dict:
             if month_num:
                 year = int(year_raw) if len(year_raw) == 4 else 2000 + int(year_raw)
                 return month_info(month_num, year)
-    now = datetime.utcnow()
-    return month_info(now.month, now.year)
+    raise ValueError("Unable to determine report month and year from the uploaded filename or workbook header.")
 
 def month_info(month_num: int, year: int) -> dict:
     abbr = MONTH_ABBR[month_num]

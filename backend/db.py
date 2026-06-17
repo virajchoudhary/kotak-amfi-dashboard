@@ -1,4 +1,5 @@
 import sqlite3
+import os
 from pathlib import Path
 
 import openpyxl
@@ -20,8 +21,17 @@ from excel_engine import (
 
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BACKEND_DIR.parent
-DB_PATH = BACKEND_DIR / "amfi.db"
 TEMPLATE_PATH = BACKEND_DIR / "data" / "template file.xlsx"
+
+
+def database_path() -> Path:
+    configured = os.getenv("AMFI_DB_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return BACKEND_DIR / "amfi.db"
+
+
+DB_PATH = database_path()
 
 SCHEMA = """
     CREATE TABLE IF NOT EXISTS {table} (
@@ -61,7 +71,10 @@ INSERT_SQL = """
 """
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    db_path = database_path()
+    if not db_path.parent.exists():
+        raise RuntimeError(f"Database directory does not exist: {db_path.parent}")
+    conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -105,8 +118,10 @@ def migrate_schema_if_needed(conn):
     ):
         return
 
-    source_table = "amfi_metrics_old" if interrupted_old_table else "amfi_metrics"
-    rows = [dict(row) for row in cursor.execute(f"SELECT * FROM {source_table}").fetchall()]
+    if interrupted_old_table:
+        rows = [dict(row) for row in cursor.execute("SELECT * FROM amfi_metrics_old").fetchall()]
+    else:
+        rows = [dict(row) for row in cursor.execute("SELECT * FROM amfi_metrics").fetchall()]
     if interrupted_old_table:
         cursor.execute("DROP TABLE IF EXISTS amfi_metrics")
     else:

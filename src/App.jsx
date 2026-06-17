@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
     Check,
     ChevronDown,
@@ -39,16 +39,17 @@ const tabs = [
     { id: 'archives', label: 'Archives' },
 ];
 
-const tooltipCursor = { fill: 'var(--chart-cursor)' };
+const chartLocale = 'en-IN';
+const lineTooltipCursor = { stroke: 'var(--chart-cursor-line)', strokeWidth: 1 };
 const activeBarStyle = {
-    fill: 'var(--chart-active-bar)',
-    stroke: 'var(--chart-active-stroke)',
-    strokeWidth: 1,
+    stroke: '#ffffff',
+    strokeWidth: 2,
+    strokeOpacity: 0.85,
 };
 
 function formatNumber(value, digits = 2) {
     if (typeof value !== 'number' || Number.isNaN(value)) return value ?? '';
-    return new Intl.NumberFormat('en-IN', { maximumFractionDigits: digits }).format(value);
+    return new Intl.NumberFormat(chartLocale, { maximumFractionDigits: digits }).format(value);
 }
 
 function formatPercent(value) {
@@ -149,10 +150,23 @@ function EmptyState({ children = 'No data loaded.' }) {
     return <div className="empty-state">{children}</div>;
 }
 
-function GlassSelect({ icon, value, options, onChange }) {
+function formatTooltipValue(item) {
+    const value = item?.value;
+    if (typeof value !== 'number' || Number.isNaN(value)) return value ?? '-';
+    const label = `${item?.name || item?.dataKey || ''} ${item?.dataKey || ''}`.toLowerCase();
+    const isPercent = label.includes('growth') || label.includes('share') || label.includes('percent') || label.includes('%');
+    const number = isPercent ? value * 100 : value;
+    const formatted = number.toLocaleString(chartLocale, { maximumFractionDigits: 2 });
+    return isPercent ? `${formatted}%` : formatted;
+}
+
+function GlassSelect({ icon, value, options, onChange, ariaLabel = 'Select option' }) {
     const [open, setOpen] = useState(false);
+    const [activeIndex, setActiveIndex] = useState(0);
     const rootRef = useRef(null);
-    const selected = options.find(option => option.value === value) || options[0];
+    const listboxId = useId();
+    const selectedIndex = Math.max(0, options.findIndex(option => option.value === value));
+    const selected = options[selectedIndex] || options[0];
 
     useEffect(() => {
         function handleClick(event) {
@@ -162,34 +176,94 @@ function GlassSelect({ icon, value, options, onChange }) {
         return () => document.removeEventListener('mousedown', handleClick);
     }, []);
 
+    useEffect(() => {
+        if (open) setActiveIndex(selectedIndex);
+    }, [open, selectedIndex]);
+
+    function selectOption(option) {
+        if (!option) return;
+        onChange(option.value);
+        setOpen(false);
+    }
+
+    function moveActive(delta) {
+        setActiveIndex(index => {
+            if (!options.length) return 0;
+            return (index + delta + options.length) % options.length;
+        });
+    }
+
+    function handleKeyDown(event) {
+        if (!options.length) return;
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            if (!open) {
+                setOpen(true);
+                setActiveIndex(selectedIndex);
+            } else {
+                moveActive(1);
+            }
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            if (!open) {
+                setOpen(true);
+                setActiveIndex(selectedIndex);
+            } else {
+                moveActive(-1);
+            }
+        } else if (event.key === 'Home') {
+            event.preventDefault();
+            setOpen(true);
+            setActiveIndex(0);
+        } else if (event.key === 'End') {
+            event.preventDefault();
+            setOpen(true);
+            setActiveIndex(options.length - 1);
+        } else if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (!open) {
+                setOpen(true);
+                setActiveIndex(selectedIndex);
+            } else {
+                selectOption(options[activeIndex]);
+            }
+        } else if (event.key === 'Escape') {
+            setOpen(false);
+        }
+    }
+
     return (
         <div className="glass-select" ref={rootRef}>
             <button
                 type="button"
                 className={`glass-select-trigger ${open ? 'open' : ''}`}
                 onClick={() => setOpen(value => !value)}
+                onKeyDown={handleKeyDown}
                 aria-haspopup="listbox"
                 aria-expanded={open}
+                aria-controls={listboxId}
+                aria-label={ariaLabel}
+                aria-activedescendant={open ? `${listboxId}-${activeIndex}` : undefined}
             >
                 {icon}
                 <span>{selected?.label}</span>
                 <ChevronDown size={16} className="glass-select-chevron" />
             </button>
             {open && (
-                <div className="glass-select-menu" role="listbox">
-                    {options.map(option => {
+                <div className="glass-select-menu" id={listboxId} role="listbox" aria-label={ariaLabel}>
+                    {options.map((option, index) => {
                         const active = option.value === value;
+                        const highlighted = index === activeIndex;
                         return (
                             <button
                                 type="button"
                                 key={option.value}
-                                className={`glass-select-option ${active ? 'active' : ''}`}
+                                id={`${listboxId}-${index}`}
+                                className={`glass-select-option ${active ? 'active' : ''} ${highlighted ? 'highlighted' : ''}`}
                                 role="option"
                                 aria-selected={active}
-                                onClick={() => {
-                                    onChange(option.value);
-                                    setOpen(false);
-                                }}
+                                onMouseEnter={() => setActiveIndex(index)}
+                                onClick={() => selectOption(option)}
                             >
                                 <span>{option.label}</span>
                                 {active && <Check size={15} />}
@@ -204,11 +278,22 @@ function GlassSelect({ icon, value, options, onChange }) {
 
 function ChartTooltip({ active, payload, label }) {
     if (!active || !payload?.length) return null;
+    const rows = payload.filter(item => item?.value !== undefined && item?.value !== null);
+    if (!rows.length) return null;
     return (
         <div className="chart-tooltip">
-            <strong>{label}</strong>
-            {payload.map(item => (
-                <span key={item.dataKey}>{item.name}: {formatNumber(item.value)}</span>
+            <strong className="chart-tooltip-title">{label}</strong>
+            {rows.map(item => (
+                <div className="chart-tooltip-row" key={`${item.dataKey}-${item.name}`}>
+                    <span className="chart-tooltip-series">
+                        <span
+                            className="chart-tooltip-dot"
+                            style={{ backgroundColor: item.color || item.stroke || item.fill || '#ffffff' }}
+                        />
+                        <span>{item.name || item.dataKey}</span>
+                    </span>
+                    <span className="chart-tooltip-value">{formatTooltipValue(item)}</span>
+                </div>
             ))}
         </div>
     );
@@ -246,12 +331,14 @@ function UploadControl({ loading, onUpload }) {
     );
 }
 
-function Overview({ data, loading, onUpload, onRefresh, selectedFY, archives }) {
+function Overview({ data, loading, isUploading, onUpload, onRefresh, selectedFY, archives }) {
     const summary = data?.summary || {};
     const series = safeSeries(data, 'timeSeries');
     const latest = series[series.length - 1] || {};
     const previous = series[series.length - 2] || {};
     const aumGrowth = previous.net_aum ? (latest.net_aum - previous.net_aum) / previous.net_aum : null;
+    const initialLoading = loading && !data;
+    const placeholder = initialLoading ? '—' : null;
 
     return (
         <>
@@ -261,17 +348,15 @@ function Overview({ data, loading, onUpload, onRefresh, selectedFY, archives }) 
                 headerAction={
                     <div className="header-controls">
                         {archives.length > 0 && (
-                            <select
-                                className="fy-select"
+                            <GlassSelect
                                 value={selectedFY}
-                                onChange={event => onRefresh(event.target.value)}
-                            >
-                                {archives.map(item => (
-                                    <option key={item.financial_year} value={item.financial_year}>
-                                        FY {item.financial_year}
-                                    </option>
-                                ))}
-                            </select>
+                                options={archives.map(item => ({
+                                    value: item.financial_year,
+                                    label: `FY ${item.financial_year}`,
+                                }))}
+                                onChange={onRefresh}
+                                ariaLabel="Select financial year"
+                            />
                         )}
                         <button className="btn-sm" onClick={() => onRefresh(selectedFY)} disabled={loading} title="Refresh data">
                             <RefreshCw size={16} />
@@ -279,17 +364,17 @@ function Overview({ data, loading, onUpload, onRefresh, selectedFY, archives }) 
                     </div>
                 }
             >
-                <UploadControl loading={loading} onUpload={onUpload} />
+                <UploadControl loading={isUploading} onUpload={onUpload} />
                 {data?.warnings?.length ? (
                     <div className="warning-list">
                         {data.warnings.map((warning, index) => <span key={index}>{warning}</span>)}
                     </div>
                 ) : null}
                 <div className="metric-grid">
-                    <MetricCard label="Latest Month" value={summary.latestMonth || '-'} detail="Compiled period" />
-                    <MetricCard label="Net AUM" value={formatCrore(summary.latestNetAum)} detail={`MoM ${formatPercent(aumGrowth)}`} tone={aumGrowth >= 0 ? 'good' : 'soft'} />
-                    <MetricCard label="Funds Mobilized" value={formatCrore(summary.latestFundsMobilized)} detail="Latest month" />
-                    <MetricCard label="Net Inflow" value={formatCrore(summary.latestNetInflow)} detail="Sales less redemption" tone={summary.latestNetInflow >= 0 ? 'good' : 'soft'} />
+                    <MetricCard label="Latest Month" value={placeholder ?? (summary.latestMonth || '-')} detail={initialLoading ? '' : 'Compiled period'} />
+                    <MetricCard label="Net AUM" value={placeholder ?? formatCrore(summary.latestNetAum)} detail={initialLoading ? '' : `MoM ${formatPercent(aumGrowth)}`} tone={initialLoading ? 'neutral' : (aumGrowth >= 0 ? 'good' : 'soft')} />
+                    <MetricCard label="Funds Mobilized" value={placeholder ?? formatCrore(summary.latestFundsMobilized)} detail={initialLoading ? '' : 'Latest month'} />
+                    <MetricCard label="Net Inflow" value={placeholder ?? formatCrore(summary.latestNetInflow)} detail={initialLoading ? '' : 'Sales less redemption'} tone={initialLoading ? 'neutral' : (summary.latestNetInflow >= 0 ? 'good' : 'soft')} />
                 </div>
             </Section>
 
@@ -310,12 +395,12 @@ function Overview({ data, loading, onUpload, onRefresh, selectedFY, archives }) 
                                         height={44}
                                     />
                                     <YAxis stroke="var(--chart-axis)" tickMargin={10} width={78} tickFormatter={value => formatCrore(value)} />
-                                    <Tooltip content={<ChartTooltip />} cursor={tooltipCursor} />
+                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} />
                                     <Area name="Net AUM" type="monotone" dataKey="net_aum" stroke="var(--chart-primary)" fill="var(--chart-fill)" strokeWidth={2.2} isAnimationActive={false} />
                                 </AreaChart>
                             </ResponsiveContainer>
                         </div>
-                    ) : <EmptyState />}
+                    ) : <EmptyState>{initialLoading ? 'Loading dashboard…' : 'No data loaded.'}</EmptyState>}
                 </Section>
 
                 <Section title="Monthly Flows">
@@ -334,7 +419,7 @@ function Overview({ data, loading, onUpload, onRefresh, selectedFY, archives }) 
                                         height={44}
                                     />
                                     <YAxis stroke="var(--chart-axis)" tickMargin={10} width={78} tickFormatter={value => formatCrore(value)} />
-                                    <Tooltip content={<ChartTooltip />} cursor={tooltipCursor} />
+                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} />
                                     <Legend />
                                     <Line name="Sales" type="monotone" dataKey="funds_mobilized" stroke="var(--chart-primary)" strokeWidth={2.2} dot={false} isAnimationActive={false} />
                                     <Line name="Redemption" type="monotone" dataKey="redemption" stroke="var(--chart-danger)" strokeWidth={2.2} dot={false} isAnimationActive={false} />
@@ -342,7 +427,7 @@ function Overview({ data, loading, onUpload, onRefresh, selectedFY, archives }) 
                                 </LineChart>
                             </ResponsiveContainer>
                         </div>
-                    ) : <EmptyState />}
+                    ) : <EmptyState>{initialLoading ? 'Loading dashboard…' : 'No data loaded.'}</EmptyState>}
                 </Section>
             </div>
         </>
@@ -416,7 +501,7 @@ function CategoriesView({ data }) {
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
                                 <XAxis dataKey="category" stroke="var(--chart-axis)" interval={0} tickMargin={10} height={70} />
                                 <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                <Tooltip content={<ChartTooltip />} cursor={tooltipCursor} />
+                                <Tooltip content={<ChartTooltip />} cursor={false} shared={false} />
                                 <Legend />
                                 <Bar name="Sales" dataKey="monthlySales" fill="var(--chart-primary)" activeBar={activeBarStyle} isAnimationActive={false} />
                                 <Bar name="Redemption" dataKey="monthlyRedemption" fill="var(--chart-danger)" activeBar={activeBarStyle} isAnimationActive={false} />
@@ -532,7 +617,7 @@ function SchemesView({ data }) {
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
                                 <XAxis type="number" stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} />
                                 <YAxis type="category" dataKey="schemeName" stroke="var(--chart-axis)" width={132} />
-                                <Tooltip content={<ChartTooltip />} cursor={tooltipCursor} />
+                                <Tooltip content={<ChartTooltip />} cursor={false} shared={false} />
                                 <Bar name="Latest AUM" dataKey="latestAum" fill="var(--chart-primary)" activeBar={activeBarStyle} isAnimationActive={false} />
                             </BarChart>
                         </ResponsiveContainer>
@@ -612,7 +697,7 @@ function SipView({ data }) {
                                         textAnchor="end"
                                     />
                                     <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                    <Tooltip content={<ChartTooltip />} cursor={tooltipCursor} />
+                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} />
                                     <Line name="Contribution" type="monotone" dataKey="contribution" stroke="var(--chart-primary)" strokeWidth={2.2} dot={false} isAnimationActive={false} />
                                 </LineChart>
                             </ResponsiveContainer>
@@ -637,7 +722,7 @@ function SipView({ data }) {
                                         textAnchor="end"
                                     />
                                     <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                    <Tooltip content={<ChartTooltip />} cursor={tooltipCursor} />
+                                    <Tooltip content={<ChartTooltip />} cursor={lineTooltipCursor} />
                                     <Area name="SIP AUM" type="monotone" dataKey="aum" stroke="var(--chart-secondary)" fill="var(--chart-fill)" strokeWidth={2.2} isAnimationActive={false} />
                                 </AreaChart>
                             </ResponsiveContainer>
@@ -654,7 +739,7 @@ function SipView({ data }) {
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
                                 <XAxis dataKey="financialYear" stroke="var(--chart-axis)" tickMargin={10} interval={0} />
                                 <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                <Tooltip content={<ChartTooltip />} cursor={tooltipCursor} />
+                                <Tooltip content={<ChartTooltip />} cursor={false} shared={false} />
                                 <Bar name="Contribution" dataKey="contribution" fill="var(--chart-primary)" activeBar={activeBarStyle} isAnimationActive={false} />
                             </BarChart>
                         </ResponsiveContainer>
@@ -752,7 +837,7 @@ function NsAnalysisView({ data }) {
                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
                                 <XAxis dataKey="label" stroke="var(--chart-axis)" tickMargin={10} interval={0} />
                                 <YAxis stroke="var(--chart-axis)" tickFormatter={value => formatCrore(value)} width={78} />
-                                <Tooltip content={<ChartTooltip />} cursor={tooltipCursor} />
+                                <Tooltip content={<ChartTooltip />} cursor={false} shared={false} />
                                 <Legend />
                                 <Bar name={ns.previousMonth || 'Previous'} dataKey="previous" fill="var(--chart-danger)" activeBar={activeBarStyle} isAnimationActive={false} />
                                 <Bar name={ns.currentMonth || 'Current'} dataKey="current" fill="var(--chart-primary)" activeBar={activeBarStyle} isAnimationActive={false} />
@@ -868,6 +953,7 @@ export default function App() {
     const [archives, setArchives] = useState([]);
     const [selectedFY, setSelectedFY] = useState('');
     const [loading, setLoading] = useState(false);
+    const [isUploading, setIsUploading] = useState(false);
     const [error, setError] = useState('');
     const [isDarkMode, setIsDarkMode] = useState(true);
 
@@ -894,18 +980,13 @@ export default function App() {
             if (!res.ok) return;
             const list = await res.json();
             setArchives(list);
-            if (list.length > 0 && !selectedFY) {
-                const latest = list[0].financial_year;
-                setSelectedFY(latest);
-                loadData(latest);
-            }
         } catch (err) {
             console.error('Failed to load archives list:', err);
         }
     }
 
     async function uploadFile(file) {
-        setLoading(true);
+        setIsUploading(true);
         setError('');
         const body = new FormData();
         body.append('file', file);
@@ -919,19 +1000,20 @@ export default function App() {
         } catch (err) {
             setError(err.message || 'Upload failed.');
         } finally {
-            setLoading(false);
+            setIsUploading(false);
         }
     }
 
     useEffect(() => {
-        loadArchives().then(() => {
-            if (!selectedFY) loadData();
-        });
+        // Critical dashboard data fires immediately; archives load in parallel so
+        // the FY dropdown never blocks the metric cards or charts.
+        loadData();
+        loadArchives();
     }, []);
 
     const content = useMemo(() => {
         if (activeTab === 'overview') {
-            return <Overview data={data} loading={loading} onUpload={uploadFile} onRefresh={loadData} selectedFY={selectedFY} archives={archives} />;
+            return <Overview data={data} loading={loading} isUploading={isUploading} onUpload={uploadFile} onRefresh={loadData} selectedFY={selectedFY} archives={archives} />;
         }
         if (activeTab === 'categories') return <CategoriesView data={data} />;
         if (activeTab === 'schemes') return <SchemesView data={data} />;
@@ -939,7 +1021,7 @@ export default function App() {
         if (activeTab === 'sip') return <SipView data={data} />;
         if (activeTab === 'archives') return <ArchivesView archives={archives} loading={loading} selectedFY={selectedFY} />;
         return null;
-    }, [activeTab, data, archives, loading, selectedFY]);
+    }, [activeTab, data, archives, loading, isUploading, selectedFY]);
 
     return (
         <div className={`app-layout ${isDarkMode ? 'dark-theme' : 'light-theme'}`}>
