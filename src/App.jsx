@@ -1,14 +1,20 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
+    Archive,
     Check,
     ChevronDown,
     Download,
+    FileSpreadsheet,
     FileUp,
+    Layers,
+    LayoutDashboard,
     Moon,
     RefreshCw,
+    Repeat,
     Search,
     SlidersHorizontal,
     Sun,
+    TrendingUp,
 } from 'lucide-react';
 import {
     Area,
@@ -32,12 +38,12 @@ const API = import.meta.env.VITE_API_URL ||
         : window.location.origin);
 
 const tabs = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'categories', label: 'Categories' },
-    { id: 'schemes', label: 'Schemes' },
-    { id: 'ns', label: 'NS Analysis' },
-    { id: 'sip', label: 'SIP' },
-    { id: 'archives', label: 'Archives' },
+    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'categories', label: 'Categories', icon: Layers },
+    { id: 'schemes', label: 'Schemes', icon: FileSpreadsheet },
+    { id: 'ns', label: 'NS Analysis', icon: TrendingUp },
+    { id: 'sip', label: 'SIP', icon: Repeat },
+    { id: 'archives', label: 'Archives', icon: Archive },
 ];
 
 const chartLocale = 'en-IN';
@@ -62,7 +68,7 @@ function nsComparisonSeries(ns) {
 }
 
 function renderActiveBar(props) {
-    return <Rectangle {...props} stroke="#fff" strokeWidth={2} strokeOpacity={0.85} />;
+    return <Rectangle {...props} stroke="var(--chart-active-stroke)" strokeWidth={2} strokeOpacity={0.85} />;
 }
 
 function formatNumber(value, digits = 2) {
@@ -335,29 +341,44 @@ function ChartTooltip({ active, payload, label, titleKey, series }) {
 
 function UploadControl({ loading, onUpload }) {
     const inputRef = useRef(null);
-    const [fileName, setFileName] = useState('');
+    const [file, setFile] = useState(null);
+    const [dragging, setDragging] = useState(false);
+
+    function accept(files) {
+        const selected = files?.[0];
+        if (selected) setFile(selected);
+    }
 
     async function submitUpload() {
-        const file = inputRef.current?.files?.[0];
         if (!file) return;
         await onUpload(file);
         if (inputRef.current) inputRef.current.value = '';
-        setFileName('');
+        setFile(null);
     }
 
     return (
         <div className="upload-row compact-upload">
-            <label className="file-input">
-                <FileUp size={18} />
-                <span>{fileName || 'Select AMFI workbook'}</span>
+            <div
+                className={`drop-zone ${dragging ? 'dragging' : ''}`}
+                onDragOver={event => { event.preventDefault(); setDragging(true); }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={event => { event.preventDefault(); setDragging(false); accept(event.dataTransfer.files); }}
+            >
+                <FileUp size={20} />
+                <div>
+                    <strong>{file?.name || 'Drop the AMFI workbook here'}</strong>
+                    <span>.xlsx or .xls · or click Browse</span>
+                </div>
+                <button type="button" className="btn-secondary" onClick={() => inputRef.current?.click()}>Browse</button>
                 <input
                     ref={inputRef}
                     type="file"
                     accept=".xlsx,.xls"
-                    onChange={event => setFileName(event.target.files?.[0]?.name || '')}
+                    onChange={event => accept(event.target.files)}
+                    hidden
                 />
-            </label>
-            <button className="btn-primary" onClick={submitUpload} disabled={loading || !fileName}>
+            </div>
+            <button className="btn-primary" onClick={submitUpload} disabled={loading || !file}>
                 {loading ? <span className="spinner" /> : <FileUp size={18} />}
                 Upload
             </button>
@@ -1007,6 +1028,12 @@ export default function App() {
     const [error, setError] = useState('');
     const [isDarkMode, setIsDarkMode] = useState(true);
 
+    useEffect(() => {
+        const theme = isDarkMode ? 'dark' : 'light';
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+    }, [isDarkMode]);
+
     async function loadData(fy) {
         setLoading(true);
         setError('');
@@ -1082,7 +1109,7 @@ export default function App() {
                         className={`sidebar-item ${activeTab === tab.id ? 'active' : ''}`}
                         onClick={() => setActiveTab(tab.id)}
                     >
-                        {tab.label}
+                        <tab.icon size={17} /><span>{tab.label}</span>
                     </button>
                 ))}
             </nav>
