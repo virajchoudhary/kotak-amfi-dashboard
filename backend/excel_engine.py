@@ -1788,7 +1788,13 @@ def compile_excel_for_fy(fy: str, conn: sqlite3.Connection | None = None) -> byt
     _retarget_sheet_references(wb, old_flat_title, ws_flat.title)
     _retarget_sheet_references(wb, old_form_title, ws_form.title)
     wb.active = 0
+    active_ws = wb.worksheets[0]
     for ws in wb.worksheets:
+        # Only the active sheet may be tab-selected. The template ships with the
+        # data sheet flagged tabSelected, which — combined with wb.active=0 —
+        # makes Excel open the sheets as a group (both tabs highlighted) and
+        # disables the outline collapse/expand buttons until the user ungroups.
+        ws.sheet_view.tabSelected = ws is active_ws
         _reset_sheet_view(ws)
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
